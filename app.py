@@ -21,6 +21,26 @@ from model import (
     save_model,
 )
 
+@st.cache_data(show_spinner="Loading & preparing data…")
+def cached_load_and_prepare(txn_path, cust_path):
+    return load_and_prepare(txn_path, cust_path)
+
+@st.cache_data(show_spinner="Running anomaly detection…")
+def cached_anomaly_detection(_df):
+    return run_anomaly_detection(_df)
+
+@st.cache_data(show_spinner="Running customer segmentation…")
+def cached_kmeans_segmentation(_df):
+    return run_kmeans_segmentation(_df)
+
+@st.cache_resource(show_spinner="Training failure model…")
+def cached_train_failure_model(_df):
+    return train_failure_model(_df)
+
+@st.cache_data(show_spinner="Scoring transactions…")
+def cached_score_transactions(_df, _clf, _df_model, feat_cols):
+    return score_transactions(_df, _clf, _df_model, feat_cols)
+
 st.set_page_config(page_title="Finance Risk Analytics", layout="wide")
 st.title("💳 Finance Transaction Risk Analytics")
 
@@ -44,7 +64,7 @@ st.header("2. 🧹 Data Cleaning & Feature Engineering")
 TXN_PATH  = "finance_transactions.csv"
 CUST_PATH = "customers.csv"
 
-df = load_and_prepare(TXN_PATH, CUST_PATH)
+df = cached_load_and_prepare(TXN_PATH, CUST_PATH)
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Total Transactions", f"{len(df):,}")
@@ -174,7 +194,7 @@ st.plotly_chart(fig, use_container_width=True)
 # ══════════════════════════════════════════════
 st.header("6. 🚨 Anomaly Detection (Isolation Forest)")
 
-df = run_anomaly_detection(df)
+df = cached_anomaly_detection(df)
 st.metric("Anomalies Detected (2% contamination)", f"{(df['anomaly'] == -1).sum():,}")
 
 sample = df.sample(min(5000, len(df)), random_state=1)
@@ -198,7 +218,7 @@ with st.expander("Top 20 Anomalous Transactions"):
 # ══════════════════════════════════════════════
 st.header("7. 🗂️ Customer Segmentation (K-Means)")
 
-cust_feat = run_kmeans_segmentation(df)
+cust_feat = cached_kmeans_segmentation(df)
 
 fig = px.scatter(cust_feat, x="pc1", y="pc2", color=cust_feat["cluster"].astype(str),
                  title="Customer Clusters (PCA 2-D)", labels={"color": "Cluster"}, opacity=0.6)
@@ -216,7 +236,7 @@ st.dataframe(
 # ══════════════════════════════════════════════
 st.header("8. 🤖 Failure Prediction Model")
 
-clf, le_dict, feat_cols, df_model, X_test, y_test, y_pred, y_prob, auc = train_failure_model(df)
+clf, le_dict, feat_cols, df_model, X_test, y_test, y_pred, y_prob, auc = cached_train_failure_model(df)
 st.success("✅ Random Forest trained on 80% of data.")
 
 st.header("9. 📊 Feature Importance")
@@ -261,7 +281,7 @@ with col_r2:
 # ══════════════════════════════════════════════
 st.header("11. 🎯 Risk Scoring")
 
-df = score_transactions(df, clf, df_model, feat_cols)
+df = cached_score_transactions(df, clf, df_model, feat_cols)
 
 band_counts = df["risk_band"].value_counts().sort_index().reset_index()
 band_counts.columns = ["band", "count"]
