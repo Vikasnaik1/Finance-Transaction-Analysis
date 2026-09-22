@@ -17,18 +17,18 @@ from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 
 
-# =========================================================
+
 # 1. LOAD + CLEAN + FEATURE ENGINEERING
-# =========================================================
+
 
 def load_and_prepare(txn_path: str, cust_path: str) -> pd.DataFrame:
 
     txn = pd.read_csv(txn_path)
     cust = pd.read_csv(cust_path)
 
-    # -----------------------------------------------------
+    
     # Clean column names
-    # -----------------------------------------------------
+    
 
     txn.columns = txn.columns.str.strip()
     cust.columns = cust.columns.str.strip()
@@ -39,9 +39,9 @@ def load_and_prepare(txn_path: str, cust_path: str) -> pd.DataFrame:
         inplace=True
     )
 
-    # -----------------------------------------------------
+    
     # Strip whitespace from text columns
-    # -----------------------------------------------------
+    
 
     for col in txn.select_dtypes(include="object").columns:
         txn[col] = txn[col].astype(str).str.strip()
@@ -49,9 +49,9 @@ def load_and_prepare(txn_path: str, cust_path: str) -> pd.DataFrame:
     for col in cust.select_dtypes(include="object").columns:
         cust[col] = cust[col].astype(str).str.strip()
 
-    # -----------------------------------------------------
+    
     # Dates
-    # -----------------------------------------------------
+    
 
     txn["transaction_date"] = pd.to_datetime(
         txn["transaction_date"],
@@ -71,9 +71,9 @@ def load_and_prepare(txn_path: str, cust_path: str) -> pd.DataFrame:
         errors="coerce"
     )
 
-    # -----------------------------------------------------
+    
     # Numeric columns
-    # -----------------------------------------------------
+    
 
     for col in ["amount", "fee_amount", "tax_amount", "risk_score"]:
 
@@ -96,9 +96,9 @@ def load_and_prepare(txn_path: str, cust_path: str) -> pd.DataFrame:
 
     txn["risk_score"] = txn["risk_score"].fillna(risk_median)
 
-    # -----------------------------------------------------
+    
     # Binary flags
-    # -----------------------------------------------------
+    
 
     txn["fraud_flag"] = (
         txn["is_fraud"]
@@ -120,9 +120,9 @@ def load_and_prepare(txn_path: str, cust_path: str) -> pd.DataFrame:
         .astype(int)
     )
 
-    # -----------------------------------------------------
+    
     # Merge transaction + customer
-    # -----------------------------------------------------
+    
 
     df = txn.merge(
         cust,
@@ -130,9 +130,9 @@ def load_and_prepare(txn_path: str, cust_path: str) -> pd.DataFrame:
         how="left"
     )
 
-    # -----------------------------------------------------
+    
     # Feature Engineering
-    # -----------------------------------------------------
+    
 
     ref_date = df["transaction_date"].max()
 
@@ -187,13 +187,13 @@ def load_and_prepare(txn_path: str, cust_path: str) -> pd.DataFrame:
         df["amount"] > amount_90
     ).astype(int)
 
-    # -----------------------------------------------------
+    
     # Customer historical features
     #
     # IMPORTANT:
     # Do not use customer failure/fraud rate here.
     # Those can leak target information.
-    # -----------------------------------------------------
+    
 
     cust_agg = (
         df.groupby("customer_id")
@@ -216,9 +216,9 @@ def load_and_prepare(txn_path: str, cust_path: str) -> pd.DataFrame:
         how="left"
     )
 
-    # -----------------------------------------------------
+    
     # Clean infinite values
-    # -----------------------------------------------------
+    
 
     df.replace(
         [np.inf, -np.inf],
@@ -229,9 +229,9 @@ def load_and_prepare(txn_path: str, cust_path: str) -> pd.DataFrame:
     return df
 
 
-# =========================================================
+
 # 2. ANOMALY DETECTION
-# =========================================================
+
 
 def run_anomaly_detection(
     df: pd.DataFrame
@@ -270,9 +270,9 @@ def run_anomaly_detection(
     return df
 
 
-# =========================================================
+
 # 3. CUSTOMER SEGMENTATION
-# =========================================================
+
 
 def run_kmeans_segmentation(
     df: pd.DataFrame,
@@ -342,9 +342,9 @@ def run_kmeans_segmentation(
     return cust_feat
 
 
-# =========================================================
+
 # 4. FAILURE PREDICTION
-# =========================================================
+
 
 CAT_COLS = [
     "transaction_type",
@@ -377,9 +377,9 @@ def train_failure_model(df: pd.DataFrame):
 
     df_model = df.copy()
 
-    # -----------------------------------------------------
+    
     # Encode categorical variables
-    # -----------------------------------------------------
+    
 
     le_dict = {}
 
@@ -397,9 +397,9 @@ def train_failure_model(df: pd.DataFrame):
 
             le_dict[col] = le
 
-    # -----------------------------------------------------
+    
     # Select available features
-    # -----------------------------------------------------
+    
 
     available_num = [
         c for c in NUM_COLS
@@ -424,9 +424,9 @@ def train_failure_model(df: pd.DataFrame):
 
     y = df_model["failed_flag"].astype(int)
 
-    # -----------------------------------------------------
+    
     # Safety check
-    # -----------------------------------------------------
+    
 
     if y.nunique() < 2:
 
@@ -435,9 +435,9 @@ def train_failure_model(df: pd.DataFrame):
             "Random Forest requires both successful and failed transactions."
         )
 
-    # -----------------------------------------------------
+    
     # Train/Test split
-    # -----------------------------------------------------
+    
 
     (
         X_train,
@@ -452,9 +452,9 @@ def train_failure_model(df: pd.DataFrame):
         stratify=y
     )
 
-    # -----------------------------------------------------
+    
     # Random Forest
-    # -----------------------------------------------------
+    
 
     clf = RandomForestClassifier(
         n_estimators=150,
@@ -470,9 +470,9 @@ def train_failure_model(df: pd.DataFrame):
         y_train
     )
 
-    # -----------------------------------------------------
+    
     # Predictions
-    # -----------------------------------------------------
+    
 
     y_pred = clf.predict(X_test)
 
@@ -498,9 +498,9 @@ def train_failure_model(df: pd.DataFrame):
     )
 
 
-# =========================================================
+
 # 5. RISK SCORING
-# =========================================================
+
 
 def score_transactions(
     df: pd.DataFrame,
@@ -544,9 +544,9 @@ def score_transactions(
     return df
 
 
-# =========================================================
+
 # 6. MODEL PERSISTENCE
-# =========================================================
+
 
 def save_model(
     clf,
