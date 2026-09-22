@@ -1,48 +1,157 @@
-"""
-app.py — Finance Risk Analytics: Streamlit UI only.
-All data / ML logic lives in model.py.
-"""
-
 import os
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import plotly.express as px
+import joblib
 import streamlit as st
 
-from sklearn.metrics import classification_report, confusion_matrix, roc_curve, ConfusionMatrixDisplay
-
-from model import (
-    load_and_prepare,
-    run_anomaly_detection,
-    run_kmeans_segmentation,
-    train_failure_model,
-    score_transactions,
-    save_model,
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.ensemble import RandomForestClassifier, IsolationForest
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    classification_report, confusion_matrix,
+    roc_auc_score, roc_curve, ConfusionMatrixDisplay,
 )
-
-@st.cache_data(show_spinner="Loading & preparing data…")
-def cached_load_and_prepare(txn_path, cust_path):
-    return load_and_prepare(txn_path, cust_path)
-
-@st.cache_data(show_spinner="Running anomaly detection…")
-def cached_anomaly_detection(_df):
-    return run_anomaly_detection(_df)
-
-@st.cache_data(show_spinner="Running customer segmentation…")
-def cached_kmeans_segmentation(_df):
-    return run_kmeans_segmentation(_df)
-
-@st.cache_resource(show_spinner="Training failure model…")
-def cached_train_failure_model(_df):
-    return train_failure_model(_df)
-
-@st.cache_data(show_spinner="Scoring transactions…")
-def cached_score_transactions(_df, _clf, _df_model, feat_cols):
-    return score_transactions(_df, _clf, _df_model, feat_cols)
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
 
 st.set_page_config(page_title="Finance Risk Analytics", layout="wide")
 st.title("💳 Finance Transaction Risk Analytics")
+
+# Folder where this script lives — always correct on Streamlit Cloud & locally
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+# ══════════════════════════════════════════════
+# CACHED FUNCTIONS  (run once, reused forever)
+# ══════════════════════════════════════════════
+
+@st.cache_data(show_spinner="Loading & preparing data…")
+def load_and_prepare():
+    txn  = pd.read_csv(os.path.join(_HERE, "finance_transactions.csv"))
+    cust = pd.read_csv(os.path.join(_HERE, "customers.csv"))
+
+    txn.columns  = txn.columns.str.strip()
+    cust.columns = cust.columns.str.strip()
+    cust.rename(columns={"fisrt_name": "first_name"}, inplace=True)
+
+    for col in txn.select_dtypes("object"):  txn[col]  = txn[col].str.strip()
+    for col in cust.select_dtypes("object"): cust[col] = cust[col].str.strip()
+
+    txn["transaction_date"] = pd.to_datetime(txn["transaction_date"], dayfirst=True, errors="coerce")
+    cust["date_of_birth"]   = pd.to_datetime(cust["date_of_birth"],   dayfirst=True, errors="coerce")
+    cust["join_date"]       = pd.to_datetime(cust["join_date"],       dayfirst=True, errors="coerce")
+
+    txn["fee_amount"] = pd.to_numeric(txn["fee_amount"], errors="coerce").fillna(0)
+    txn["tax_amount"] = pd.to_numeric(txn["tax_amount"], errors="coerce").fillna(0)
+    txn["risk_score"] = pd.to_numeric(txn["risk_score"], errors="coerce")
+    txn["risk_score"].fillna(txn["risk_score"].median(), inplace=True)
+
+    txn["fraud_flag"]  = txn["is_fraud"].str.lower().map({"yes": 1, "no": 0}).fillna(0).astype(int)
+    txn["failed_flag"] = (txn["transaction_status"].str.lower() == "failed").astype(int)
+
+    df = txn.merge(cust, on="customer_id", how="left")
+
+    ref = df["transaction_date"].max()
+    df["txn_year"]      = df["transaction_date"].dt.year
+    df["txn_month"]     = df["transaction_date"].dt.month
+    df["txn_dow"]       = df["transaction_date"].dt.dayofweek
+    df["txn_quarter"]   = df["transaction_date"].dt.quarter
+    df["age"]           = ((ref - df["date_of_birth"]).dt.days / 365.25).round(1)
+    df["tenure_months"] = ((ref - df["join_date"]).dt.days / 30.44).round(1)
+    df["total_cost"]    = df["amount"] + df["fee_amount"] + df["tax_amount"]
+    df["fee_rate"]      = (df["fee_amount"] / df["amount"].replace(0, np.nan)).fillna(0).round(4)
+    df["high_amount"]   = (df["amount"] > df["amount"].quantile(0.90)).astype(int)
+
+    cust_agg = df.groupby("customer_id").agg(
+        cust_txn_count  = ("transaction_id", "count"),
+        cust_avg_amount = ("amount", "mean"),
+        cust_fail_rate  = ("failed_flag", "mean"),
+        cust_fraud_rate = ("fraud_flag", "mean"),
+    ).reset_index()
+    df = df.merge(cust_agg, on="customer_id", how="left")
+    return df
+
+
+@st.cache_data(show_spinner="Running anomaly detection…")
+def run_anomaly(_df):
+    iso_features = ["amount", "fee_amount", "tax_amount", "risk_score", "fee_rate", "total_cost"]
+    X_iso = _df[iso_features].fillna(0)
+    iso = IsolationForest(n_estimators=100, contamination=0.02, random_state=42)
+    out = _df.copy()
+    out["anomaly"]       = iso.fit_predict(X_iso)
+    out["anomaly_score"] = -iso.score_samples(X_iso)
+    return out
+
+
+@st.cache_data(show_spinner="Running customer segmentation…")
+def run_segmentation(_df):
+    cust_feat = _df.groupby("customer_id").agg(
+        total_spent = ("amount",         "sum"),
+        txn_count   = ("transaction_id", "count"),
+        avg_amount  = ("amount",         "mean"),
+        fail_rate   = ("failed_flag",    "mean"),
+        fraud_rate  = ("fraud_flag",     "mean"),
+        avg_risk    = ("risk_score",     "mean"),
+    ).reset_index()
+    X_km = StandardScaler().fit_transform(cust_feat.drop("customer_id", axis=1).fillna(0))
+    cust_feat["cluster"] = KMeans(n_clusters=4, random_state=42, n_init=10).fit_predict(X_km)
+    coords = PCA(n_components=2, random_state=42).fit_transform(X_km)
+    cust_feat["pc1"] = coords[:, 0]
+    cust_feat["pc2"] = coords[:, 1]
+    return cust_feat
+
+
+@st.cache_resource(show_spinner="Training failure model…")
+def train_model(_df):
+    CAT_COLS = ["transaction_type", "channel", "merchant_category", "currency",
+                "customer_segment", "occupation", "gender"]
+    NUM_COLS = ["amount", "fee_amount", "tax_amount", "risk_score", "fee_rate",
+                "total_cost", "high_amount", "txn_month", "txn_dow",
+                "cust_txn_count", "cust_avg_amount", "cust_fail_rate", "age", "tenure_months"]
+
+    le_dict  = {}
+    df_model = _df.copy()
+    for c in CAT_COLS:
+        if c in df_model.columns:
+            le = LabelEncoder()
+            df_model[c] = le.fit_transform(df_model[c].astype(str))
+            le_dict[c]  = le
+
+    feat_cols = NUM_COLS + [c for c in CAT_COLS if c in df_model.columns]
+    X = df_model[feat_cols].fillna(0)
+    y = df_model["failed_flag"]
+
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
+    clf = RandomForestClassifier(
+        n_estimators=150, max_depth=12,
+        class_weight="balanced", random_state=42, n_jobs=-1
+    )
+    clf.fit(X_train, y_train)
+
+    y_pred = clf.predict(X_test)
+    y_prob = clf.predict_proba(X_test)[:, 1]
+    auc    = roc_auc_score(y_test, y_prob)
+    return clf, le_dict, feat_cols, df_model, X_test, y_test, y_pred, y_prob, auc
+
+
+# ══════════════════════════════════════════════
+# RUN ALL HEAVY WORK  (cached after first run)
+# ══════════════════════════════════════════════
+df        = load_and_prepare()
+df        = run_anomaly(df)
+cust_feat = run_segmentation(df)
+clf, le_dict, feat_cols, df_model, X_test, y_test, y_pred, y_prob, auc = train_model(df)
+
+df = df.copy()
+df["fail_prob"] = clf.predict_proba(df_model[feat_cols].fillna(0))[:, 1]
+df["risk_band"] = pd.cut(
+    df["fail_prob"],
+    bins=[0, 0.2, 0.4, 0.6, 0.8, 1.0],
+    labels=["Very Low", "Low", "Medium", "High", "Very High"],
+)
 
 # ══════════════════════════════════════════════
 # 1. BUSINESS UNDERSTANDING
@@ -57,14 +166,9 @@ st.markdown("""
 """)
 
 # ══════════════════════════════════════════════
-# 2. DATA CLEANING
+# 2. DATA CLEANING & FEATURE ENGINEERING
 # ══════════════════════════════════════════════
 st.header("2. 🧹 Data Cleaning & Feature Engineering")
-
-TXN_PATH  = "finance_transactions.csv"
-CUST_PATH = "customers.csv"
-
-df = cached_load_and_prepare(TXN_PATH, CUST_PATH)
 
 col1, col2, col3 = st.columns(3)
 col1.metric("Total Transactions", f"{len(df):,}")
@@ -74,10 +178,7 @@ col3.metric("Null Values",        int(df.isnull().sum().sum()))
 with st.expander("Cleaned Data Sample"):
     st.dataframe(df.head(20), use_container_width=True)
 
-st.success(
-    "Features added: age, tenure_months, total_cost, fee_rate, high_amount, "
-    "txn_month, txn_dow, cust_fail_rate, cust_fraud_rate"
-)
+st.success("Features added: age, tenure_months, total_cost, fee_rate, high_amount, txn_month, txn_dow, cust_fail_rate, cust_fraud_rate")
 
 with st.expander("Feature Sample"):
     st.dataframe(
@@ -130,9 +231,9 @@ tab_a, tab_b, tab_c = st.tabs(["By Segment", "By Channel", "By Merchant Category
 with tab_a:
     seg = df.groupby("customer_segment").agg(
         txn_count  = ("transaction_id", "count"),
-        avg_amount = ("amount", "mean"),
-        fraud_rate = ("fraud_flag", "mean"),
-        fail_rate  = ("failed_flag", "mean"),
+        avg_amount = ("amount",         "mean"),
+        fraud_rate = ("fraud_flag",     "mean"),
+        fail_rate  = ("failed_flag",    "mean"),
     ).reset_index()
     st.dataframe(
         seg.style.format({"avg_amount": "{:.0f}", "fraud_rate": "{:.3f}", "fail_rate": "{:.3f}"}),
@@ -143,26 +244,19 @@ with tab_a:
     st.plotly_chart(fig, use_container_width=True)
 
 with tab_b:
-    ch = (
-        df.groupby("channel")
-        .agg(txn_count=("transaction_id", "count"), avg_amount=("amount", "mean"), fail_rate=("failed_flag", "mean"))
-        .reset_index()
-        .sort_values("txn_count", ascending=False)
-    )
+    ch = (df.groupby("channel")
+          .agg(txn_count=("transaction_id", "count"), avg_amount=("amount", "mean"), fail_rate=("failed_flag", "mean"))
+          .reset_index().sort_values("txn_count", ascending=False))
     fig = px.bar(ch, x="channel", y="txn_count", color="fail_rate",
                  title="Transactions per Channel (colour = failure rate)", color_continuous_scale="Oranges")
     st.plotly_chart(fig, use_container_width=True)
 
 with tab_c:
-    mc = (
-        df.groupby("merchant_category")
-        .agg(txn_count=("transaction_id", "count"), fraud_rate=("fraud_flag", "mean"))
-        .reset_index()
-        .sort_values("fraud_rate", ascending=False)
-    )
+    mc = (df.groupby("merchant_category")
+          .agg(txn_count=("transaction_id", "count"), fraud_rate=("fraud_flag", "mean"))
+          .reset_index().sort_values("fraud_rate", ascending=False))
     fig = px.bar(mc, x="merchant_category", y="fraud_rate",
-                 title="Fraud Rate by Merchant Category",
-                 color="fraud_rate", color_continuous_scale="Reds")
+                 title="Fraud Rate by Merchant Category", color="fraud_rate", color_continuous_scale="Reds")
     st.plotly_chart(fig, use_container_width=True)
 
 # ══════════════════════════════════════════════
@@ -194,7 +288,6 @@ st.plotly_chart(fig, use_container_width=True)
 # ══════════════════════════════════════════════
 st.header("6. 🚨 Anomaly Detection (Isolation Forest)")
 
-df = cached_anomaly_detection(df)
 st.metric("Anomalies Detected (2% contamination)", f"{(df['anomaly'] == -1).sum():,}")
 
 sample = df.sample(min(5000, len(df)), random_state=1)
@@ -218,8 +311,6 @@ with st.expander("Top 20 Anomalous Transactions"):
 # ══════════════════════════════════════════════
 st.header("7. 🗂️ Customer Segmentation (K-Means)")
 
-cust_feat = cached_kmeans_segmentation(df)
-
 fig = px.scatter(cust_feat, x="pc1", y="pc2", color=cust_feat["cluster"].astype(str),
                  title="Customer Clusters (PCA 2-D)", labels={"color": "Cluster"}, opacity=0.6)
 st.plotly_chart(fig, use_container_width=True)
@@ -232,13 +323,14 @@ st.dataframe(
 )
 
 # ══════════════════════════════════════════════
-# 8. FAILURE PREDICTION + FEATURE IMPORTANCE
+# 8. FAILURE PREDICTION MODEL
 # ══════════════════════════════════════════════
 st.header("8. 🤖 Failure Prediction Model")
-
-clf, le_dict, feat_cols, df_model, X_test, y_test, y_pred, y_prob, auc = cached_train_failure_model(df)
 st.success("✅ Random Forest trained on 80% of data.")
 
+# ══════════════════════════════════════════════
+# 9. FEATURE IMPORTANCE
+# ══════════════════════════════════════════════
 st.header("9. 📊 Feature Importance")
 fi = pd.DataFrame({"feature": feat_cols, "importance": clf.feature_importances_})
 fi = fi.sort_values("importance", ascending=False).head(15)
@@ -248,7 +340,7 @@ fig.update_layout(yaxis=dict(autorange="reversed"))
 st.plotly_chart(fig, use_container_width=True)
 
 # ══════════════════════════════════════════════
-# 9. MODEL EVALUATION
+# 10. MODEL EVALUATION
 # ══════════════════════════════════════════════
 st.header("10. 📈 Model Evaluation")
 
@@ -267,6 +359,7 @@ with col_r1:
     ax.plot([0, 1], [0, 1], "--", color="grey")
     ax.set_xlabel("FPR"); ax.set_ylabel("TPR"); ax.set_title("ROC Curve"); ax.legend()
     st.pyplot(fig)
+    plt.close(fig)
 
 with col_r2:
     fig, ax = plt.subplots(figsize=(4, 4))
@@ -275,13 +368,12 @@ with col_r2:
     ).plot(ax=ax, colorbar=False, cmap="Blues")
     ax.set_title("Confusion Matrix")
     st.pyplot(fig)
+    plt.close(fig)
 
 # ══════════════════════════════════════════════
-# 10. RISK SCORING
+# 11. RISK SCORING
 # ══════════════════════════════════════════════
 st.header("11. 🎯 Risk Scoring")
-
-df = cached_score_transactions(df, clf, df_model, feat_cols)
 
 band_counts = df["risk_band"].value_counts().sort_index().reset_index()
 band_counts.columns = ["band", "count"]
@@ -300,21 +392,21 @@ with st.expander("High / Very High Risk Transactions"):
     )
 
 # ══════════════════════════════════════════════
-# 11. MODEL SAVING
+# 12. MODEL SAVING
 # ══════════════════════════════════════════════
 st.header("12. 💾 Model Saving")
 
-MODEL_PATH = "failure_model.joblib"
+MODEL_PATH = os.path.join(_HERE, "failure_model.joblib")
 
 if st.button("💾 Save Model"):
-    save_model(clf, feat_cols, le_dict, MODEL_PATH)
+    joblib.dump({"model": clf, "features": feat_cols, "encoders": le_dict}, MODEL_PATH)
     st.success(f"Model saved → {MODEL_PATH}")
 
 if os.path.exists(MODEL_PATH):
     st.info(f"✅ Model file exists: `{MODEL_PATH}` ({os.path.getsize(MODEL_PATH)/1024:.1f} KB)")
 
 # ══════════════════════════════════════════════
-# 12. FINAL SUMMARY
+# 13. FINAL SUMMARY
 # ══════════════════════════════════════════════
 st.header("13. ✅ Final Summary")
 
@@ -331,7 +423,7 @@ st.markdown(f"""
 """)
 
 # ══════════════════════════════════════════════
-# 13. LIVE TRANSACTION RISK PREDICTOR
+# 14. LIVE TRANSACTION RISK PREDICTOR
 # ══════════════════════════════════════════════
 st.header("14. 🔮 Live Transaction Risk Predictor")
 
