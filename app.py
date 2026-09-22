@@ -45,7 +45,7 @@ def load_and_prepare():
     txn["fee_amount"] = pd.to_numeric(txn["fee_amount"], errors="coerce").fillna(0)
     txn["tax_amount"] = pd.to_numeric(txn["tax_amount"], errors="coerce").fillna(0)
     txn["risk_score"] = pd.to_numeric(txn["risk_score"], errors="coerce")
-    txn["risk_score"].fillna(txn["risk_score"].median(), inplace=True)
+    txn["risk_score"] = txn["risk_score"].fillna(txn["risk_score"].median())
 
     txn["fraud_flag"]  = txn["is_fraud"].str.lower().map({"yes": 1, "no": 0}).fillna(0).astype(int)
     txn["failed_flag"] = (txn["transaction_status"].str.lower() == "failed").astype(int)
@@ -126,7 +126,7 @@ def train_model(_df):
         X, y, test_size=0.2, random_state=42, stratify=y
     )
     clf = RandomForestClassifier(
-        n_estimators=150, max_depth=12,
+        n_estimators=100, max_depth=10,
         class_weight="balanced", random_state=42, n_jobs=-1
     )
     clf.fit(X_train, y_train)
