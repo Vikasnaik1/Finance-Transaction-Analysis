@@ -4,7 +4,7 @@
 ![Finance Transaction Analysis Dashboard](image.png)
 ### Transaction Details
 
-![Finance Transaction Analysis Dashboard](image1.png)
+![Finance Transaction Analysis Dashboard](image2.png)
 
 **Finance & Transaction Analysis** is an interactive Power BI dashboard designed to analyze financial transaction performance and identify business trends across transaction value, transaction volume, customer segments, transaction types, geographic regions, transaction status, and customer demographics.
 
